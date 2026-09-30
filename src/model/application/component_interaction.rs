@@ -338,6 +338,7 @@ impl Serialize for ComponentInteractionDataKind {
 /// [Discord docs](https://discord.com/developers/docs/interactions/receiving-and-responding#interaction-object-message-component-data-structure).
 #[cfg_attr(feature = "typesize", derive(typesize::derive::TypeSize))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(try_from = "Value")]
 #[non_exhaustive]
 pub struct ComponentInteractionData {
     /// The custom id of the component.
@@ -346,6 +347,50 @@ pub struct ComponentInteractionData {
     #[serde(flatten)]
     pub kind: ComponentInteractionDataKind,
     /// The parameters and the given values. The converted objects from the given options.
+    ///
+    /// Ori CV2 fork (F1): if `resolved` fails its typed parse (for example a role without
+    /// `colors`), it is left empty and logged at debug under the `serenity::cv2` target, instead of
+    /// dropping the whole interaction. The untouched value is in [`Self::raw_data`].
     #[serde(default)]
     pub resolved: CommandDataResolved,
+    /// Ori CV2 fork (F1): the whole `data` object exactly as Discord sent it, including the
+    /// clicked component's numeric `id`, `values` and `resolved`. Never serialized.
+    #[serde(skip_serializing)]
+    pub raw_data: Value,
+}
+
+/// Ori CV2 fork (F1): the typed fields of [`ComponentInteractionData`], with the same serde
+/// attributes as 0.12.5, except that `resolved` is held raw so that a malformed entry cannot fail
+/// the parse.
+#[derive(Deserialize)]
+struct ComponentInteractionDataWire {
+    custom_id: String,
+    #[serde(flatten)]
+    kind: ComponentInteractionDataKind,
+    #[serde(default)]
+    resolved: Option<Value>,
+}
+
+impl TryFrom<Value> for ComponentInteractionData {
+    type Error = Error;
+
+    fn try_from(raw_data: Value) -> Result<Self> {
+        let wire: ComponentInteractionDataWire = json::from_value(raw_data.clone())?;
+        let resolved = match wire.resolved {
+            Some(resolved) => json::from_value(resolved).unwrap_or_else(|err| {
+                tracing::debug!(
+                    target: "serenity::cv2",
+                    "Ignoring component interaction resolved data that failed to parse: {err}"
+                );
+                CommandDataResolved::default()
+            }),
+            None => CommandDataResolved::default(),
+        };
+        Ok(Self {
+            custom_id: wire.custom_id,
+            kind: wire.kind,
+            resolved,
+            raw_data,
+        })
+    }
 }

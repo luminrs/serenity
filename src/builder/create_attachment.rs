@@ -115,6 +115,19 @@ impl CreateAttachment {
         self.description = Some(description.into());
         self
     }
+
+    /// Sets the placeholder id of the file (Ori CV2 fork, F1).
+    ///
+    /// The file is uploaded as the multipart part `files[{id}]`, and the payload's `attachments`
+    /// entry with the same `id` describes it. Every attachment starts with id 0, so set distinct
+    /// ids (0, 1, 2, ...) before passing several files to a raw [`Http`] method. Builders such as
+    /// [`CreateMessage`] number their files themselves and overwrite this value.
+    ///
+    /// [`CreateMessage`]: crate::builder::CreateMessage
+    pub fn id(mut self, id: u64) -> Self {
+        self.id = id;
+        self
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq)]

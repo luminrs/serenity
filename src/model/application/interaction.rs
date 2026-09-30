@@ -305,6 +305,8 @@ bitflags! {
         const EPHEMERAL = 1 << 6;
         /// Does not trigger push notifications or desktop notifications.
         const SUPPRESS_NOTIFICATIONS = 1 << 12;
+        /// The message uses Components V2 (Ori CV2 fork, F1).
+        const IS_COMPONENTS_V2 = 1 << 15;
     }
 }
 

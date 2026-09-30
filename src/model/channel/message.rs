@@ -22,7 +22,12 @@ use crate::gateway::ShardMessenger;
 #[cfg(feature = "model")]
 use crate::http::{CacheHttp, Http};
 use crate::model::prelude::*;
-use crate::model::utils::{deserialize_components, discord_colours, StrOrInt};
+use crate::model::utils::{
+    components_from_raw,
+    deserialize_raw_some,
+    discord_colours,
+    StrOrInt,
+};
 #[cfg(all(feature = "model", feature = "cache"))]
 use crate::utils;
 
@@ -32,6 +37,7 @@ use crate::utils;
 /// [extra fields](https://discord.com/developers/docs/topics/gateway-events#message-create-message-create-extra-fields).
 #[cfg_attr(feature = "typesize", derive(typesize::derive::TypeSize))]
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(try_from = "MessageWire")]
 #[non_exhaustive]
 pub struct Message {
     /// The unique Id of the message. Can be used to calculate the creation date of the message.
@@ -118,7 +124,7 @@ pub struct Message {
     /// The thread that was started from this message, includes thread member object.
     pub thread: Option<GuildChannel>,
     /// The components of this message
-    #[serde(default, deserialize_with = "deserialize_components")]
+    // Parsed leniently from `raw_components` by `MessageWire` (Ori CV2 fork, F1).
     pub components: Vec<ActionRow>,
     /// Array of message sticker item objects.
     #[serde(default)]
@@ -149,6 +155,116 @@ pub struct Message {
     ///
     /// Only present in [`MessageCreateEvent`].
     pub poll: Option<Box<Poll>>,
+    /// Ori CV2 fork (F1): the `components` array exactly as Discord sent it, or `None` if the
+    /// payload had no `components` key.
+    ///
+    /// Unlike [`Self::components`], it keeps everything serenity cannot type, such as Components
+    /// V2 layouts and content. It is never serialized.
+    #[serde(skip_serializing)]
+    pub raw_components: Option<crate::json::Value>,
+}
+
+/// Ori CV2 fork (F1): the only `Deserialize` path of [`Message`].
+///
+/// It repeats every field of [`Message`] with the same serde attributes, except that `components`
+/// is held as the raw JSON value. [`TryFrom`] parses the typed rows from it with the lenient
+/// [`deserialize_components`] and keeps the value as [`Message::raw_components`].
+#[derive(Deserialize)]
+#[allow(deprecated)] // `MessageInteraction` is deprecated with `unstable_discord_api`.
+struct MessageWire {
+    id: MessageId,
+    channel_id: ChannelId,
+    author: User,
+    content: String,
+    timestamp: Timestamp,
+    edited_timestamp: Option<Timestamp>,
+    tts: bool,
+    mention_everyone: bool,
+    mentions: Vec<User>,
+    mention_roles: Vec<RoleId>,
+    #[serde(default = "Vec::new")]
+    mention_channels: Vec<ChannelMention>,
+    attachments: Vec<Attachment>,
+    embeds: Vec<Embed>,
+    #[serde(default)]
+    reactions: Vec<MessageReaction>,
+    #[serde(default)]
+    nonce: Option<Nonce>,
+    pinned: bool,
+    webhook_id: Option<WebhookId>,
+    #[serde(rename = "type")]
+    kind: MessageType,
+    activity: Option<MessageActivity>,
+    application: Option<MessageApplication>,
+    application_id: Option<ApplicationId>,
+    message_reference: Option<MessageReference>,
+    flags: Option<MessageFlags>,
+    referenced_message: Option<Box<Message>>,
+    #[serde(default, deserialize_with = "deserialize_snapshots")]
+    message_snapshots: Vec<MessageSnapshot>,
+    interaction: Option<Box<MessageInteraction>>,
+    interaction_metadata: Option<Box<MessageInteractionMetadata>>,
+    thread: Option<GuildChannel>,
+    #[serde(default, deserialize_with = "deserialize_raw_some")]
+    components: Option<crate::json::Value>,
+    #[serde(default)]
+    sticker_items: Vec<StickerItem>,
+    position: Option<u64>,
+    role_subscription_data: Option<RoleSubscriptionData>,
+    guild_id: Option<GuildId>,
+    member: Option<Box<PartialMember>>,
+    poll: Option<Box<Poll>>,
+}
+
+impl TryFrom<MessageWire> for Message {
+    type Error = crate::Error;
+
+    fn try_from(wire: MessageWire) -> crate::Result<Self> {
+        let components = match &wire.components {
+            Some(raw) => components_from_raw(raw)?,
+            None => Vec::new(),
+        };
+
+        #[allow(deprecated)] // `interaction` is copied as is.
+        Ok(Self {
+            id: wire.id,
+            channel_id: wire.channel_id,
+            author: wire.author,
+            content: wire.content,
+            timestamp: wire.timestamp,
+            edited_timestamp: wire.edited_timestamp,
+            tts: wire.tts,
+            mention_everyone: wire.mention_everyone,
+            mentions: wire.mentions,
+            mention_roles: wire.mention_roles,
+            mention_channels: wire.mention_channels,
+            attachments: wire.attachments,
+            embeds: wire.embeds,
+            reactions: wire.reactions,
+            nonce: wire.nonce,
+            pinned: wire.pinned,
+            webhook_id: wire.webhook_id,
+            kind: wire.kind,
+            activity: wire.activity,
+            application: wire.application,
+            application_id: wire.application_id,
+            message_reference: wire.message_reference,
+            flags: wire.flags,
+            referenced_message: wire.referenced_message,
+            message_snapshots: wire.message_snapshots,
+            interaction: wire.interaction,
+            interaction_metadata: wire.interaction_metadata,
+            thread: wire.thread,
+            components,
+            sticker_items: wire.sticker_items,
+            position: wire.position,
+            role_subscription_data: wire.role_subscription_data,
+            guild_id: wire.guild_id,
+            member: wire.member,
+            poll: wire.poll,
+            raw_components: wire.components,
+        })
+    }
 }
 
 #[cfg(feature = "model")]
@@ -1200,6 +1316,7 @@ pub struct ChannelMention {
 /// For field documentation, see [`Message`].
 #[cfg_attr(feature = "typesize", derive(typesize::derive::TypeSize))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "MessageSnapshotWire")]
 #[non_exhaustive]
 pub struct MessageSnapshot {
     pub content: String,
@@ -1213,10 +1330,59 @@ pub struct MessageSnapshot {
     #[serde(rename = "type")]
     pub kind: MessageType,
     pub flags: Option<MessageFlags>,
-    #[serde(default, deserialize_with = "deserialize_components")]
+    // Parsed leniently from `raw_components` by `MessageSnapshotWire` (Ori CV2 fork, F1).
     pub components: Vec<ActionRow>,
     #[serde(default)]
     pub sticker_items: Vec<StickerItem>,
+    /// Ori CV2 fork (F1): see [`Message::raw_components`]. Never serialized.
+    #[serde(skip_serializing)]
+    pub raw_components: Option<crate::json::Value>,
+}
+
+/// Ori CV2 fork (F1): the only `Deserialize` path of [`MessageSnapshot`]; see [`MessageWire`].
+#[derive(Deserialize)]
+struct MessageSnapshotWire {
+    content: String,
+    timestamp: Timestamp,
+    edited_timestamp: Option<Timestamp>,
+    mentions: Vec<User>,
+    #[serde(default)]
+    mention_roles: Vec<RoleId>,
+    attachments: Vec<Attachment>,
+    embeds: Vec<Embed>,
+    #[serde(rename = "type")]
+    kind: MessageType,
+    flags: Option<MessageFlags>,
+    #[serde(default, deserialize_with = "deserialize_raw_some")]
+    components: Option<crate::json::Value>,
+    #[serde(default)]
+    sticker_items: Vec<StickerItem>,
+}
+
+impl TryFrom<MessageSnapshotWire> for MessageSnapshot {
+    type Error = crate::Error;
+
+    fn try_from(wire: MessageSnapshotWire) -> crate::Result<Self> {
+        let components = match &wire.components {
+            Some(raw) => components_from_raw(raw)?,
+            None => Vec::new(),
+        };
+
+        Ok(Self {
+            content: wire.content,
+            timestamp: wire.timestamp,
+            edited_timestamp: wire.edited_timestamp,
+            mentions: wire.mentions,
+            mention_roles: wire.mention_roles,
+            attachments: wire.attachments,
+            embeds: wire.embeds,
+            kind: wire.kind,
+            flags: wire.flags,
+            components,
+            sticker_items: wire.sticker_items,
+            raw_components: wire.components,
+        })
+    }
 }
 
 /// Custom deserialization function to handle the nested "message" field
@@ -1276,6 +1442,12 @@ bitflags! {
         /// As of 2023-04-20, bots are currently not able to send voice messages
         /// ([source](https://github.com/discord/discord-api-docs/pull/6082)).
         const IS_VOICE_MESSAGE = 1 << 13;
+        /// This message uses Components V2: its layout and content live in `components`, and
+        /// `content`, `embeds`, `poll` and stickers cannot be used.
+        ///
+        /// Ori CV2 fork (F1): defined so that the bit survives deserialization (unknown bits are
+        /// truncated).
+        const IS_COMPONENTS_V2 = 1 << 15;
     }
 }
 

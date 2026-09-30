@@ -36,8 +36,33 @@ pub struct ActionRow {
     #[serde(rename = "type")]
     pub kind: ComponentType,
     /// The components of this ActionRow.
-    #[serde(default)]
+    ///
+    /// Ori CV2 fork (F1): a child whose typed parse fails (for example a component type serenity
+    /// does not know) is skipped and logged at debug under the `serenity::cv2` target, instead of
+    /// failing the row and with it the whole message or interaction.
+    #[serde(default, deserialize_with = "deserialize_row_children")]
     pub components: Vec<ActionRowComponent>,
+}
+
+/// Ori CV2 fork (F1): the lenient parser for [`ActionRow::components`].
+fn deserialize_row_children<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> StdResult<Vec<ActionRowComponent>, D::Error> {
+    let values = Vec::<Value>::deserialize(deserializer)?;
+    let children = values
+        .into_iter()
+        .filter_map(|value| match from_value(value) {
+            Ok(child) => Some(child),
+            Err(err) => {
+                tracing::debug!(
+                    target: "serenity::cv2",
+                    "Skipping action row child that failed to parse: {err}"
+                );
+                None
+            },
+        })
+        .collect();
+    Ok(children)
 }
 
 /// A component which can be inside of an [`ActionRow`].

@@ -8,6 +8,7 @@ use serde::ser::{Serialize, SerializeSeq, Serializer};
 use serde_cow::CowStr;
 
 use super::prelude::*;
+use crate::json::from_value;
 
 pub fn default_true() -> bool {
     true
@@ -468,20 +469,13 @@ where
         .collect()
 }
 
-// A function used for deserializing components within a MessageUpdateEvent.
-// Due to discord now sending the whole message payload, we don't need to distinguish between None
-// and empty, as such we always return Some.
-pub fn optional_deserialize_components<'de, D>(
-    deserializer: D,
-) -> Result<Option<Vec<ActionRow>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    deserialize_components(deserializer).map(Some)
-}
-
 // Custom deserialize function to deserialize components safely without knocking the whole message
 // out when new components are found but not supported.
+//
+// Ori CV2 fork (F1): an entry that is not an object, has no integer `type`, or is an action row
+// whose typed parse fails is skipped too (logged at debug under the `serenity::cv2` target),
+// instead of failing the whole payload. Children of rows are skipped the same way by `ActionRow`.
+// Whenever 0.12.5 parsed the array, the result is unchanged.
 pub fn deserialize_components<'de, D>(deserializer: D) -> Result<Vec<ActionRow>, D::Error>
 where
     D: Deserializer<'de>,
@@ -501,22 +495,9 @@ where
         {
             let mut components = Vec::with_capacity(seq.size_hint().unwrap_or_default());
 
-            while let Some(map) = seq.next_element::<JsonMap>()? {
-                // We deserialize only the `kind` field to determine the component type.
-                // We later use this to check if its a supported component before deserializing the
-                // entire payload.
-                let raw_kind =
-                    map.get("type").ok_or_else(|| DeError::missing_field("type"))?.clone();
-                let kind: i64 = deserialize_val(raw_kind)?;
-
-                // Action rows are the only top level component supported in serenity at this time.
-                if kind == 1 {
-                    let value = Value::from(map);
-                    components.push(ActionRow::deserialize(value).map_err(DeError::custom)?);
-                } else {
-                    // Top level component is not an action row and cannot be supported on
-                    // serenity@current without breaking changes, so we skip them.
-                    tracing::debug!("Skipping component with unsupported kind: {kind}");
+            while let Some(value) = seq.next_element::<Value>()? {
+                if let Some(row) = lenient_top_level_row(value) {
+                    components.push(row);
                 }
             }
 
@@ -525,4 +506,91 @@ where
     }
 
     deserializer.deserialize_seq(ComponentsVisitor)
+}
+
+/// Ori CV2 fork (F1): one entry of a message's `components` array, or `None` if it is skipped.
+fn lenient_top_level_row(value: Value) -> Option<ActionRow> {
+    let map: JsonMap = match from_value(value) {
+        Ok(map) => map,
+        Err(err) => {
+            tracing::debug!(
+                target: "serenity::cv2",
+                "Skipping component that is not an object: {err}"
+            );
+            return None;
+        },
+    };
+
+    // We deserialize only the `kind` field to determine the component type. We later use this to
+    // check if its a supported component before deserializing the entire payload.
+    let kind: i64 = match map.get("type").cloned().map(from_value) {
+        Some(Ok(kind)) => kind,
+        Some(Err(err)) => {
+            tracing::debug!(
+                target: "serenity::cv2",
+                "Skipping component with an invalid type: {err}"
+            );
+            return None;
+        },
+        None => {
+            tracing::debug!(target: "serenity::cv2", "Skipping component without a type");
+            return None;
+        },
+    };
+
+    // Action rows are the only top level component supported in serenity at this time.
+    if kind == 1 {
+        lenient_row(Value::from(map))
+    } else {
+        // Top level component is not an action row and cannot be supported on serenity@current
+        // without breaking changes, so we skip them.
+        tracing::debug!("Skipping component with unsupported kind: {kind}");
+        None
+    }
+}
+
+/// Ori CV2 fork (F1): parses one action row, or skips it with a debug log (target
+/// `serenity::cv2`) if its typed parse fails.
+pub(crate) fn lenient_row(value: Value) -> Option<ActionRow> {
+    match from_value(value) {
+        Ok(row) => Some(row),
+        Err(err) => {
+            tracing::debug!(
+                target: "serenity::cv2",
+                "Skipping action row that failed to parse: {err}"
+            );
+            None
+        },
+    }
+}
+
+/// Ori CV2 fork (F1): the rows of a modal submit's `data.components`.
+///
+/// As in 0.12.5, every entry is kept whatever its `type` (a Label becomes a row of kind
+/// `Unknown(18)` with no children). Only an entry whose typed parse fails is skipped, with a debug
+/// log, instead of failing the whole interaction.
+pub(crate) fn deserialize_modal_rows<'de, D>(deserializer: D) -> Result<Vec<ActionRow>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<Value>::deserialize(deserializer)?;
+    Ok(values.into_iter().filter_map(lenient_row).collect())
+}
+
+/// Ori CV2 fork (F1): parses a raw `components` array (as kept in a `raw_components` field) into
+/// typed rows, exactly as [`deserialize_components`] would have parsed it in place.
+pub(crate) fn components_from_raw(raw: &Value) -> crate::Result<Vec<ActionRow>> {
+    #[derive(Deserialize)]
+    struct Rows(#[serde(deserialize_with = "deserialize_components")] Vec<ActionRow>);
+
+    from_value::<Rows>(raw.clone()).map(|rows| rows.0)
+}
+
+/// Ori CV2 fork (F1): for `#[serde(default, deserialize_with = "...")]` on a raw `Option<Value>`
+/// field, so that a missing key gives `None` and any present value, `null` included, gives `Some`.
+pub(crate) fn deserialize_raw_some<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }

@@ -12,10 +12,11 @@ use serde::Serialize;
 use crate::constants::Opcode;
 use crate::model::prelude::*;
 use crate::model::utils::{
+    components_from_raw,
+    deserialize_raw_some,
     deserialize_val,
     emojis,
     members,
-    optional_deserialize_components,
     remove_from_map,
     remove_from_map_opt,
     stickers,
@@ -555,6 +556,7 @@ where
 /// [Discord docs](https://discord.com/developers/docs/topics/gateway-events#message-update).
 #[cfg_attr(feature = "typesize", derive(typesize::derive::TypeSize))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(try_from = "MessageUpdateEventWire")]
 #[non_exhaustive]
 pub struct MessageUpdateEvent {
     pub id: MessageId,
@@ -593,13 +595,117 @@ pub struct MessageUpdateEvent {
     pub interaction_metadata: Option<Option<Box<MessageInteractionMetadata>>>,
     #[serde(default, deserialize_with = "deserialize_some")]
     pub thread: Option<Option<GuildChannel>>,
-    #[serde(default, deserialize_with = "optional_deserialize_components")]
+    // Parsed leniently from `raw_components` by `MessageUpdateEventWire`. As in 0.12.5, a present
+    // array is always `Some`, because Discord now sends the whole message.
     pub components: Option<Vec<ActionRow>>,
     pub sticker_items: Option<Vec<StickerItem>>,
     pub position: Option<Option<u64>>,
     pub role_subscription_data: Option<Option<RoleSubscriptionData>>,
     pub guild_id: Option<GuildId>,
     pub member: Option<Option<Box<PartialMember>>>,
+    /// Ori CV2 fork (F1): the `components` array exactly as Discord sent it, or `None` if the
+    /// update had no `components` key. See [`Message::raw_components`]. Never serialized.
+    #[serde(skip_serializing)]
+    pub raw_components: Option<Value>,
+}
+
+/// Ori CV2 fork (F1): the only `Deserialize` path of [`MessageUpdateEvent`].
+///
+/// It repeats every field with the same serde attributes, except that `components` is held as the
+/// raw JSON value; see `MessageWire` in `model/channel/message.rs`.
+#[derive(Deserialize)]
+#[allow(deprecated)] // `MessageInteraction` is deprecated with `unstable_discord_api`.
+struct MessageUpdateEventWire {
+    id: MessageId,
+    channel_id: ChannelId,
+    author: Option<User>,
+    content: Option<String>,
+    timestamp: Option<Timestamp>,
+    edited_timestamp: Option<Timestamp>,
+    tts: Option<bool>,
+    mention_everyone: Option<bool>,
+    mentions: Option<Vec<User>>,
+    mention_roles: Option<Vec<RoleId>>,
+    mention_channels: Option<Vec<ChannelMention>>,
+    attachments: Option<Vec<Attachment>>,
+    embeds: Option<Vec<Embed>>,
+    reactions: Option<Vec<MessageReaction>>,
+    pinned: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    webhook_id: Option<Option<WebhookId>>,
+    #[serde(rename = "type")]
+    kind: Option<MessageType>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    activity: Option<Option<MessageActivity>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    application: Option<Option<MessageApplication>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    application_id: Option<Option<ApplicationId>>,
+    message_reference: Option<Option<MessageReference>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    flags: Option<Option<MessageFlags>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    referenced_message: Option<Option<Box<Message>>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    interaction: Option<Option<Box<MessageInteraction>>>,
+    interaction_metadata: Option<Option<Box<MessageInteractionMetadata>>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    thread: Option<Option<GuildChannel>>,
+    #[serde(default, deserialize_with = "deserialize_raw_some")]
+    components: Option<Value>,
+    sticker_items: Option<Vec<StickerItem>>,
+    position: Option<Option<u64>>,
+    role_subscription_data: Option<Option<RoleSubscriptionData>>,
+    guild_id: Option<GuildId>,
+    member: Option<Option<Box<PartialMember>>>,
+}
+
+impl TryFrom<MessageUpdateEventWire> for MessageUpdateEvent {
+    type Error = crate::Error;
+
+    fn try_from(wire: MessageUpdateEventWire) -> crate::Result<Self> {
+        let components = match &wire.components {
+            Some(raw) => Some(components_from_raw(raw)?),
+            None => None,
+        };
+
+        #[allow(deprecated)] // `interaction` is copied as is.
+        Ok(Self {
+            id: wire.id,
+            channel_id: wire.channel_id,
+            author: wire.author,
+            content: wire.content,
+            timestamp: wire.timestamp,
+            edited_timestamp: wire.edited_timestamp,
+            tts: wire.tts,
+            mention_everyone: wire.mention_everyone,
+            mentions: wire.mentions,
+            mention_roles: wire.mention_roles,
+            mention_channels: wire.mention_channels,
+            attachments: wire.attachments,
+            embeds: wire.embeds,
+            reactions: wire.reactions,
+            pinned: wire.pinned,
+            webhook_id: wire.webhook_id,
+            kind: wire.kind,
+            activity: wire.activity,
+            application: wire.application,
+            application_id: wire.application_id,
+            message_reference: wire.message_reference,
+            flags: wire.flags,
+            referenced_message: wire.referenced_message,
+            interaction: wire.interaction,
+            interaction_metadata: wire.interaction_metadata,
+            thread: wire.thread,
+            components,
+            sticker_items: wire.sticker_items,
+            position: wire.position,
+            role_subscription_data: wire.role_subscription_data,
+            guild_id: wire.guild_id,
+            member: wire.member,
+            raw_components: wire.components,
+        })
+    }
 }
 
 impl MessageUpdateEvent {
@@ -643,6 +749,7 @@ impl MessageUpdateEvent {
             role_subscription_data,
             guild_id,
             member,
+            raw_components,
         } = self;
 
         // Discord won't send a MessageUpdateEvent with a different MessageId and ChannelId than we
@@ -681,6 +788,7 @@ impl MessageUpdateEvent {
         if let Some(x) = role_subscription_data { message.role_subscription_data.clone_from(x) }
         message.guild_id = *guild_id;
         if let Some(x) = member { message.member.clone_from(x) }
+        if let Some(x) = raw_components { message.raw_components = Some(x.clone()) }
     }
 }
 

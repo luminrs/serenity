@@ -12,6 +12,7 @@ use crate::builder::{
 use crate::http::{CacheHttp, Http};
 use crate::internal::prelude::*;
 use crate::model::prelude::*;
+use crate::model::utils::deserialize_modal_rows;
 
 /// An interaction triggered by a modal submit.
 ///
@@ -218,10 +219,43 @@ impl Serialize for ModalInteraction {
 /// [Discord docs](https://discord.com/developers/docs/interactions/receiving-and-responding#interaction-object-interaction-data-structure).
 #[cfg_attr(feature = "typesize", derive(typesize::derive::TypeSize))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(try_from = "Value")]
 #[non_exhaustive]
 pub struct ModalInteractionData {
     /// The custom id of the modal
     pub custom_id: String,
     /// The components.
+    ///
+    /// Ori CV2 fork (F1): an entry whose typed parse fails is skipped (logged at debug under the
+    /// `serenity::cv2` target) instead of failing the interaction. Labels and other components
+    /// serenity cannot type still appear as rows of kind [`ComponentType::Unknown`] with no
+    /// children, as in 0.12.5; read them from [`Self::raw_data`].
     pub components: Vec<ActionRow>,
+    /// Ori CV2 fork (F1): the whole `data` object exactly as Discord sent it, including every
+    /// submitted component (Labels, text displays, uploads, ...) and `resolved`. Never
+    /// serialized.
+    #[serde(skip_serializing)]
+    pub raw_data: Value,
+}
+
+/// Ori CV2 fork (F1): the typed fields of [`ModalInteractionData`], with the same serde attributes
+/// as 0.12.5 plus the lenient row parser.
+#[derive(Deserialize)]
+struct ModalInteractionDataWire {
+    custom_id: String,
+    #[serde(deserialize_with = "deserialize_modal_rows")]
+    components: Vec<ActionRow>,
+}
+
+impl TryFrom<Value> for ModalInteractionData {
+    type Error = Error;
+
+    fn try_from(raw_data: Value) -> Result<Self> {
+        let wire: ModalInteractionDataWire = crate::json::from_value(raw_data.clone())?;
+        Ok(Self {
+            custom_id: wire.custom_id,
+            components: wire.components,
+            raw_data,
+        })
+    }
 }
