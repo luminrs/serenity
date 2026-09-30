@@ -1,0 +1,17 @@
+# Ori CV2 fork (F1): differential corpus test. Every document is parsed with stock serenity 0.12.5
+# from crates.io and with this fork; see tests/differential.rs. Not part of the serenity workspace.
+[package]
+name = "serenity-cv2-tests"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.74"
+publish = false
+
+[workspace]
+
+[dependencies]
+# Ori's feature set: serenity's defaults plus `collector` (enabled by poise 0.6.1).
+serenity = { path = "..", features = ["collector"] }
+serenity_stock = { package = "serenity", version = "=0.12.5", features = ["collector"] }
+serde_json = "1.0.108"
+serde = "1.0.192"

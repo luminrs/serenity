@@ -1,0 +1,44 @@
+# Ori CV2 fork (F1): the fork's own checks. See cv2-tests/tests/differential.rs.
+name: Ori CV2
+
+on:
+  push:
+    branches: [ori/0.12.5-cv2]
+  pull_request:
+    branches: [ori/0.12.5-cv2]
+
+env:
+  CARGO_TERM_COLOR: always
+  # The repository's .cargo/config.toml sets target-cpu=haswell; an empty RUSTFLAGS overrides it.
+  RUSTFLAGS: ""
+
+jobs:
+  fork-tests:
+    name: Fork tests (stable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tests (default features)
+        run: cargo test --lib --tests
+      - name: Tests (Ori's features)
+        run: cargo test --lib --tests --features collector
+      - name: Build (simd_json, typesize)
+        run: |
+          cargo check --no-default-features --features default_no_backend,rustls_backend,simd_json
+          cargo check --features default,unstable_discord_api,typesize
+
+  differential:
+    name: Differential corpus vs stock 0.12.5 (Rust ${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: ["stable", "1.88"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - name: Differential test (Ori's locked dependency versions)
+        working-directory: cv2-tests
+        run: cargo test --locked -- --nocapture

@@ -70,3 +70,51 @@ fn guess_mime_str(part: Part, filename: &str) -> Result<Part> {
     let mime_type = mime_guess::from_path(filename).first_or_octet_stream();
     part.mime_str(mime_type.essence_str()).map_err(Into::into)
 }
+
+#[cfg(test)]
+mod tests {
+    use futures::StreamExt as _;
+
+    use super::*;
+
+    async fn form_body(multipart: Multipart) -> String {
+        let mut stream = multipart.build_form().unwrap().into_stream();
+        let mut body = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            body.extend_from_slice(&chunk.unwrap());
+        }
+        String::from_utf8_lossy(&body).into_owned()
+    }
+
+    /// Ori CV2 fork (F1): with `CreateAttachment::id`, several files passed to a raw `Http` method
+    /// get distinct `files[n]` parts instead of all being `files[0]`.
+    #[tokio::test]
+    async fn multipart_names_files_by_id() {
+        let files = vec![
+            CreateAttachment::bytes(b"first".to_vec(), "a.png").id(0),
+            CreateAttachment::bytes(b"second".to_vec(), "b.png").id(1),
+        ];
+        let body = form_body(Multipart {
+            upload: MultipartUpload::Attachments(files),
+            fields: vec![],
+            payload_json: Some(r#"{"attachments":[{"id":0},{"id":1}]}"#.into()),
+        })
+        .await;
+        assert!(body.contains(r#"name="files[0]"; filename="a.png""#), "{body}");
+        assert!(body.contains(r#"name="files[1]"; filename="b.png""#), "{body}");
+        assert!(body.contains(r#"name="payload_json""#));
+
+        // Without the setter every file is `files[0]`, as in 0.12.5.
+        let files = vec![
+            CreateAttachment::bytes(b"first".to_vec(), "a.png"),
+            CreateAttachment::bytes(b"second".to_vec(), "b.png"),
+        ];
+        let body = form_body(Multipart {
+            upload: MultipartUpload::Attachments(files),
+            fields: vec![],
+            payload_json: None,
+        })
+        .await;
+        assert_eq!(body.matches(r#"name="files[0]""#).count(), 2);
+    }
+}
